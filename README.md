@@ -1,19 +1,24 @@
-# 🔐 Secure Access to AWS Secrets Manager using IAM & KMS
+Ah! You’re right — the README mentions IAM, STS, and KMS, but it doesn’t clearly explain **Secrets Manager** as the main service we’re interacting with. Let me update it to explicitly highlight **Secrets Manager usage**, how the secrets are stored, retrieved, and how STS interacts with it.
 
-This project demonstrates **secure access control** to AWS **Secrets Manager** secrets that are protected by **KMS (Key Management Service)** encryption.
+Here’s the revised **GitHub-ready README.md**:
 
-It uses an **IAM user or IAM role** with fine-grained permissions to list and retrieve secrets using the **AWS SDK for Python (boto3)**.
+---
+
+```markdown
+# 🔐 Secure Access to AWS Secrets Manager using IAM & STS
+
+This project demonstrates **secure access control to AWS Secrets Manager secrets** using **temporary credentials generated via AWS STS (Security Token Service)**. Secrets are encrypted with KMS (Key Management Service) and accessed using fine-grained IAM roles or user permissions.
 
 ---
 
 ## 🧠 Overview
 
-- **Goal:** Access AWS Secrets Manager secrets securely using IAM credentials.
-- **Encryption:** The secrets are encrypted using a **KMS key** created in your AWS account.
-- **Access Control:** Controlled via **IAM policies** (principle of least privilege).
-- **Language:** Python (uses `boto3` and `botocore` libraries).
+- **Goal:** Access AWS Secrets Manager secrets securely using IAM credentials and STS temporary tokens.
+- **Secrets Manager:** Stores sensitive credentials such as database passwords, API keys, etc. Secrets are encrypted with a KMS key.
+- **Access Control:** Controlled via IAM users/roles and policies (principle of least privilege).
+- **Language:** Python (uses `boto3` and `botocore`).
 - **Input:** Credentials loaded from `creds.txt`.
-- **Output:** Lists available secrets and retrieves the selected secret securely.
+- **Output:** Lists available secrets in Secrets Manager and retrieves the selected secret securely.
 
 ---
 
@@ -21,19 +26,20 @@ It uses an **IAM user or IAM role** with fine-grained permissions to list and re
 
 Before running the script, ensure you have:
 
-1. **AWS account** with a configured KMS key and Secrets Manager secret.
-2. **IAM user or IAM role** with permissions for:
-    - `secretsmanager:ListSecrets`
-    - `secretsmanager:GetSecretValue`
-    - `kms:Decrypt`
-3. **Python 3.x** installed.
-4. **boto3** and **botocore** libraries installed:
-    
-    ```bash
-    pip install boto3 botocore
-    
-    ```
-    
+- AWS account with a configured **KMS key** and **Secrets Manager secrets**.
+- IAM user or IAM role with permissions for:
+  - `secretsmanager:ListSecrets`
+  - `secretsmanager:GetSecretValue`
+  - `secretsmanager:DescribeSecret`
+  - `kms:Decrypt`
+  - `sts:AssumeRole` (if using a role for temporary credentials)
+- Python 3.x installed.
+- `boto3` and `botocore` libraries installed:
+
+```bash
+pip install boto3 botocore
+
+```
 
 ---
 
@@ -61,11 +67,8 @@ ASSUME_ROLE_ARN=<OPTIONAL_ROLE_ARN>
 
 > 💡 ASSUME_ROLE_ARN is optional.
 > 
-> 
-> If not specified, the script will use the static credentials directly.
-> 
-> If provided, it will use STS to assume the given role temporarily.
-> 
+> - If provided, the script will **assume the role** and use **temporary credentials** via STS.
+> - If not specified, it will use the **static credentials** directly.
 
 ---
 
@@ -78,14 +81,14 @@ python secrets-reader.py
 
 ```
 
-**What it does:**
+### What it does:
 
 1. Loads AWS credentials from `creds.txt`.
-2. Initializes a session using those credentials.
-3. (Optional) Assumes the IAM role if `ASSUME_ROLE_ARN` is specified.
-4. Lists all available secrets in AWS Secrets Manager.
-5. Prompts you to select a secret by **name or number**.
-6. Retrieves and displays the secret value.
+2. Initializes a base session using those credentials.
+3. (Optional) Assumes the IAM role if `ASSUME_ROLE_ARN` is specified, obtaining **temporary credentials**.
+4. Lists all available **Secrets Manager secrets** accessible to the session.
+5. Prompts you to select a secret by name or number.
+6. Retrieves and displays the **secret value securely**.
 
 ---
 
@@ -93,14 +96,12 @@ python secrets-reader.py
 
 ```
 Available Secrets in Secrets Manager:
-
 1. MyAppSecret
 2. DatabasePassword
 
 Enter secret name (or number) to retrieve: 1
 
 Secret Retrieved Successfully!
-
 Secret Name: MyAppSecret
 Secret Value: {"username":"dbadmin","password":"StrongPass123"}
 
@@ -110,16 +111,17 @@ Secret Value: {"username":"dbadmin","password":"StrongPass123"}
 
 ## 🛡️ Security Notes
 
-- Avoid committing your actual `creds.txt` to GitHub — it should be **.gitignored**.
+- Avoid committing your actual `creds.txt` to GitHub — add it to `.gitignore`.
 - Use **IAM roles** (EC2, Lambda, etc.) instead of hardcoding credentials where possible.
-- Keep **least privilege** policies for KMS and Secrets Manager access.
+- Keep **least privilege policies** for KMS and Secrets Manager access.
 - Enable **CloudTrail** for auditing secret access events.
+- Temporary credentials generated by STS **expire automatically**, reducing long-term risk.
 
 ---
 
 ## 📜 Example IAM Policy
 
-Attach this policy to your IAM user or role to grant access to the specific secret and key:
+Attach this policy to your IAM user or role to grant access to specific secrets and the KMS key:
 
 ```json
 {
@@ -138,6 +140,11 @@ Attach this policy to your IAM user or role to grant access to the specific secr
       "Effect": "Allow",
       "Action": "kms:Decrypt",
       "Resource": "arn:aws:kms:ap-south-1:111122223333:key/your-key-id"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::991046440595:role/secrets-reader-role"
     }
   ]
 }
@@ -154,13 +161,12 @@ Attach this policy to your IAM user or role to grant access to the specific secr
 | User 2 | IAM User 2 / Team Member |
 | User 3 | IAM User 3 / Team Member |
 
-> Each user should have unique access credentials to test secure access.
-> 
+Each user should have unique access credentials to test secure access.
 
 ---
 
 ## 🧾 License
 
-This project is for **educational and security demonstration** purposes only.
+This project is for **educational and security demonstration purposes only**.
 
-Ensure that all credentials and AWS resources are managed responsibly.
+Ensure all credentials and AWS resources are managed responsibly.
