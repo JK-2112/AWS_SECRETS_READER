@@ -3,6 +3,7 @@ import botocore
 import os
 
 def load_credentials(file_path="creds.txt"):
+    """Load IAM user credentials and optional role ARN from a file."""
     creds = {}
     try:
         with open(file_path, "r") as f:
@@ -16,53 +17,41 @@ def load_credentials(file_path="creds.txt"):
     return creds
 
 def init_base_session(creds):
-    os.environ["AWS_ACCESS_KEY_ID"] = creds["AWS_ACCESS_KEY_ID"]
-    os.environ["AWS_SECRET_ACCESS_KEY"] = creds["AWS_SECRET_ACCESS_KEY"]
-    os.environ["AWS_DEFAULT_REGION"] = creds.get("AWS_REGION", "us-east-1")
-
+    """Initialize a session with static IAM credentials (used only for STS)."""
     return boto3.session.Session(
         aws_access_key_id=creds["AWS_ACCESS_KEY_ID"],
         aws_secret_access_key=creds["AWS_SECRET_ACCESS_KEY"],
         region_name=creds.get("AWS_REGION", "us-east-1")
     )
-    
-def assume_role_if_specified(base_session, creds):
-    if "ASSUME_ROLE_ARN" not in creds:
-        return base_session  # no role, use static creds directly
 
-    sts_client = base_session.client("sts")
+def assume_role(base_session, role_arn, region):
+    """Use STS to assume a role and return a session with temporary credentials."""
+    sts_client = base_session.client("sts", region_name=region)
     try:
-        print(f"Assuming role: {creds['ASSUME_ROLE_ARN']} ...")
         response = sts_client.assume_role(
-            RoleArn=creds["ASSUME_ROLE_ARN"],
-            RoleSessionName="secretReaderSession"
+            RoleArn=role_arn,
+            RoleSessionName="SecretsReaderSession"
         )
-        creds_sts = response["Credentials"]
-        session = boto3.session.Session(
-            aws_access_key_id=creds_sts["AccessKeyId"],
-            aws_secret_access_key=creds_sts["SecretAccessKey"],
-            aws_session_token=creds_sts["SessionToken"],
-            region_name=creds.get("AWS_REGION", "us-east-1")
-        )
-        print("Role assumed successfully.\n")
-        return session
+        temp_creds = response["Credentials"]
+        print("Role assumed successfully. Temporary credentials obtained.\n")
 
+        # Create a session with temporary credentials
+        return boto3.session.Session(
+            aws_access_key_id=temp_creds["AccessKeyId"],
+            aws_secret_access_key=temp_creds["SecretAccessKey"],
+            aws_session_token=temp_creds["SessionToken"],
+            region_name=region
+        )
     except botocore.exceptions.ClientError as e:
-        code = e.response["Error"]["Code"]
-        msg = e.response["Error"]["Message"]
-        print("\nCould not assume role!")
-        print("Error Code:", code)
-        print("Reason:", msg)
-        if code == "AccessDenied":
-            print("Your IAM user does not have 'sts:AssumeRole' permission for this role.")
-            print("Check the role's trust policy and your IAM permissions.")
-        return base_session  # fallback to static credentials
-    
+        print("Failed to assume role:", e)
+        return base_session  # fallback to base session if role assumption fails
+
 def list_secrets(client):
+    """List all secrets available to the current session."""
     try:
-        print("\nAvailable Secrets in Secrets Manager:\n")
-        paginator = client.get_paginator("list_secrets")
+        print("\nAvailable Secrets:\n")
         secrets = []
+        paginator = client.get_paginator("list_secrets")
         index = 1
         for page in paginator.paginate():
             for secret in page.get("SecretList", []):
@@ -70,22 +59,14 @@ def list_secrets(client):
                 secrets.append(secret["Name"])
                 index += 1
         if not secrets:
-            print("No secrets found in this region.")
+            print("No secrets found.")
         return secrets
-
     except botocore.exceptions.ClientError as e:
-        code = e.response["Error"]["Code"]
-        msg = e.response["Error"]["Message"]
-
-        print("\nCould not list secrets!")
-        print("Error Code:", code)
-        print("Reason:", msg)
-
-        if code == "AccessDeniedException":
-            print("Your IAM user/role does not have 'secretsmanager:ListSecrets' permission.")
+        print("Error listing secrets:", e)
         return []
 
 def get_secret(client, secret_name):
+    """Retrieve the secret value from Secrets Manager using temporary credentials."""
     try:
         response = client.get_secret_value(SecretId=secret_name)
         print("\nSecret Retrieved Successfully!\n")
@@ -93,37 +74,28 @@ def get_secret(client, secret_name):
         if "SecretString" in response:
             print("Secret Value:", response["SecretString"])
         else:
-            print("Binary Secret (Base64 Encoded):", response["SecretBinary"])
-
+            print("Binary Secret (Base64):", response["SecretBinary"])
     except botocore.exceptions.ClientError as e:
-        code = e.response["Error"]["Code"]
-        msg = e.response["Error"]["Message"]
-        print("\nCould not retrieve secret!")
-        print("Error Code:", code)
-        print("Reason:", msg)
-
-        if code == "AccessDeniedException":
-            print("Your IAM user/role does not have 'secretsmanager:GetSecretValue' permission.")
-            print("KMS key may require 'kms:Decrypt' permission.")
-        elif code == "DecryptionFailure":
-            print("KMS decryption failed: check key policy or permissions.")
-        elif code == "ResourceNotFoundException":
-            print("Secret not found. Check the name or region.")
-        else:
-            print("\nFull AWS Error:", e)
+        print("Error retrieving secret:", e)
+        if e.response['Error']['Code'] == "AccessDeniedException":
+            print("Check that your role has permissions for Secrets Manager and KMS decryption.")
 
 def main():
     creds = load_credentials("creds.txt")
     base_session = init_base_session(creds)
-    session = assume_role_if_specified(base_session, creds)
-    client = session.client("secretsmanager")
 
+    # Use STS assume-role if a role ARN is provided
+    if "ASSUME_ROLE_ARN" in creds and creds["ASSUME_ROLE_ARN"]:
+        session = assume_role(base_session, creds["ASSUME_ROLE_ARN"], creds.get("AWS_REGION", "us-east-1"))
+    else:
+        session = base_session
+
+    client = session.client("secretsmanager")
     secrets = list_secrets(client)
     if not secrets:
         return
 
     choice = input("\nEnter secret name (or number) to retrieve: ").strip()
-
     if choice.isdigit():
         idx = int(choice) - 1
         if 0 <= idx < len(secrets):
