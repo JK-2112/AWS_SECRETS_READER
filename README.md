@@ -1,10 +1,3 @@
-Ah! You’re right — the README mentions IAM, STS, and KMS, but it doesn’t clearly explain **Secrets Manager** as the main service we’re interacting with. Let me update it to explicitly highlight **Secrets Manager usage**, how the secrets are stored, retrieved, and how STS interacts with it.
-
-Here’s the revised **GitHub-ready README.md**:
-
----
-
-```markdown
 # 🔐 Secure Access to AWS Secrets Manager using IAM & STS
 
 This project demonstrates **secure access control to AWS Secrets Manager secrets** using **temporary credentials generated via AWS STS (Security Token Service)**. Secrets are encrypted with KMS (Key Management Service) and accessed using fine-grained IAM roles or user permissions.
