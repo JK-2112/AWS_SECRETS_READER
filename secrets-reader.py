@@ -1,135 +1,177 @@
 import boto3
-import botocore
-import os
+import hmac
+import hashlib
+import base64
+import getpass
+import botocore.exceptions
 
-def load_credentials(file_path="creds.txt"):
-    creds = {}
+# -------------------------------
+# CONFIGURATION
+# -------------------------------
+REGION = "YOUR AWS REGION"
+USER_POOL_ID = "YOUR USER POOL ID"
+CLIENT_ID = "YOUR CLIENT ID"
+CLIENT_SECRET = "YOUR CLIENT SECRET"  
+IDENTITY_POOL_ID = "YOUR IDENTITY POOL ID"
+# -------------------------------
+
+
+def get_secret_hash(username: str) -> str:
+    message = username + CLIENT_ID
+    dig = hmac.new(
+        CLIENT_SECRET.encode("utf-8"),
+        msg=message.encode("utf-8"),
+        digestmod=hashlib.sha256
+    ).digest()
+    return base64.b64encode(dig).decode()
+
+
+def authenticate_user(username: str, password: str) -> dict:
+    client = boto3.client("cognito-idp", region_name=REGION)
+    print("🔐 Authenticating user with Cognito...")
     try:
-        with open(file_path, "r") as f:
-            for line in f:
-                if "=" in line:
-                    key, value = line.strip().split("=", 1)
-                    creds[key.strip()] = value.strip()
-    except FileNotFoundError:
-        print(f"❌ Credential file '{file_path}' not found!")
-        exit(1)
-    return creds
+        response = client.initiate_auth(
+            ClientId=CLIENT_ID,
+            AuthFlow="USER_PASSWORD_AUTH",
+            AuthParameters={
+                "USERNAME": username,
+                "PASSWORD": password,
+                "SECRET_HASH": get_secret_hash(username)
+            }
+        )
+        print("✅ Authenticated Successfully!")
+        return response["AuthenticationResult"]
 
-def init_base_session(creds):
-    os.environ["AWS_ACCESS_KEY_ID"] = creds["AWS_ACCESS_KEY_ID"]
-    os.environ["AWS_SECRET_ACCESS_KEY"] = creds["AWS_SECRET_ACCESS_KEY"]
-    os.environ["AWS_DEFAULT_REGION"] = creds.get("AWS_REGION", "us-east-1")
-    return boto3.session.Session(
-        aws_access_key_id=creds["AWS_ACCESS_KEY_ID"],
-        aws_secret_access_key=creds["AWS_SECRET_ACCESS_KEY"],
-        region_name=creds.get("AWS_REGION", "us-east-1")
+    except botocore.exceptions.ClientError as e:
+        code = e.response["Error"]["Code"]
+        msg = e.response["Error"]["Message"]
+
+        if code == "NotAuthorizedException":
+            print("🚫 Authentication failed: Incorrect username or password.")
+        elif code == "UserNotFoundException":
+            print("🚫 Authentication failed: User does not exist in this user pool.")
+        else:
+            print(f"🚫 Authentication error: {msg}")
+        exit(1)
+
+
+def get_temporary_credentials(id_token: str) -> dict:
+    print("\n🔄 Getting temporary AWS credentials via Cognito Identity...")
+    client = boto3.client("cognito-identity", region_name=REGION)
+
+    try:
+        identity_id_response = client.get_id(
+            IdentityPoolId=IDENTITY_POOL_ID,
+            Logins={f"cognito-idp.{REGION}.amazonaws.com/{USER_POOL_ID}": id_token}
+        )
+        identity_id = identity_id_response["IdentityId"]
+
+        credentials = client.get_credentials_for_identity(
+            IdentityId=identity_id,
+            Logins={f"cognito-idp.{REGION}.amazonaws.com/{USER_POOL_ID}": id_token}
+        )["Credentials"]
+
+        print("✅ Temporary AWS Credentials Retrieved")
+        return credentials
+
+    except botocore.exceptions.ClientError as e:
+        code = e.response["Error"]["Code"]
+        msg = e.response["Error"]["Message"]
+
+        print("\n🚫 Failed to get temporary credentials.")
+        if "ambiguous role mapping" in msg.lower():
+            print("❗ Cognito cannot determine which IAM role to assign.")
+            print("👉 Check your Identity Pool's 'Role selection' and 'Role resolution' settings.")
+            print("   - Ensure it's set to 'Choose role with preferred_role claim in tokens'.")
+            print("👉 Also verify that the user belongs to a Cognito group with a role attached.")
+        elif code == "NotAuthorizedException":
+            print("🚫 Unauthorized: The token or role mapping may be invalid.")
+        else:
+            print(f"⚠️ AWS Error: {msg}")
+        exit(1)
+
+
+def access_secrets_interactively(creds: dict):
+    secrets_client = boto3.client(
+        "secretsmanager",
+        region_name=REGION,
+        aws_access_key_id=creds["AccessKeyId"],
+        aws_secret_access_key=creds["SecretKey"],
+        aws_session_token=creds["SessionToken"]
     )
 
-def assume_role_if_specified(base_session, creds):
-    if "ASSUME_ROLE_ARN" not in creds or not creds["ASSUME_ROLE_ARN"].strip():
-        print("ℹ️ No role ARN specified — using static credentials.")
-        return base_session
-    sts_client = base_session.client("sts")
+    print("\n🔍 Fetching available secrets...")
     try:
-        print(f"🔄 Attempting to assume role: {creds['ASSUME_ROLE_ARN']} ...")
-        response = sts_client.assume_role(
-            RoleArn=creds["ASSUME_ROLE_ARN"],
-            RoleSessionName="secretReaderSession"
-        )
-        creds_sts = response["Credentials"]
-        session = boto3.session.Session(
-            aws_access_key_id=creds_sts["AccessKeyId"],
-            aws_secret_access_key=creds_sts["SecretAccessKey"],
-            aws_session_token=creds_sts["SessionToken"],
-            region_name=creds.get("AWS_REGION", "us-east-1")
-        )
-        print("✅ Role assumed successfully.")
-        return session
-    except botocore.exceptions.ClientError as e:
-        code = e.response["Error"]["Code"]
-        msg = e.response["Error"]["Message"]
-        print("\n❌ Could not assume role!")
-        print("Error Code:", code)
-        print("Reason:", msg)
-        if code == "AccessDenied":
-            print("⚠️ Your IAM user lacks 'sts:AssumeRole' permission for this role.")
-            print("   Check the trust policy and your IAM permissions.")
-        elif code == "NoSuchEntity":
-            print("⚠️ The specified role ARN does not exist.")
-        elif code == "MalformedPolicyDocument":
-            print("⚠️ The role policy might be invalid.")
-        else:
-            print("⚠️ Unexpected error while assuming role.")
-        print("↩️ Reverting to base session with static credentials.\n")
-        return base_session
+        secrets = secrets_client.list_secrets()
+        secret_list = secrets.get("SecretList", [])
+        if not secret_list:
+            print("ℹ️ No secrets found in your account.")
+            return
 
-def list_secrets(client):
-    try:
-        print("\n🔍 Fetching secrets from AWS Secrets Manager...\n")
-        paginator = client.get_paginator("list_secrets")
-        secrets = []
-        index = 1
-        for page in paginator.paginate():
-            for secret in page.get("SecretList", []):
-                print(f"{index}. {secret['Name']}")
-                secrets.append(secret["Name"])
-                index += 1
-        if not secrets:
-            print("ℹ️ No secrets found in this region.")
-        return secrets
-    except botocore.exceptions.ClientError as e:
-        code = e.response["Error"]["Code"]
-        msg = e.response["Error"]["Message"]
-        print("\n❌ Could not list secrets!")
-        print("Error Code:", code)
-        print("Reason:", msg)
-        if code == "AccessDeniedException":
-            print("⚠️ Missing 'secretsmanager:ListSecrets' permission.")
-        return []
+        print("\n📜 Available Secrets:")
+        for idx, secret in enumerate(secret_list, start=1):
+            print(f"{idx}. {secret['Name']}")
 
-def get_secret(client, secret_name):
-    try:
-        response = client.get_secret_value(SecretId=secret_name)
-        print("\n✅ Secret Retrieved Successfully!\n")
-        print("Secret Name:", secret_name)
-        if "SecretString" in response:
-            print("Secret Value:", response["SecretString"])
-        else:
-            print("Binary Secret (Base64 Encoded):", response["SecretBinary"])
+        choice = input("\n👉 Enter the number of the secret you want to view: ").strip()
+        if not choice.isdigit() or int(choice) < 1 or int(choice) > len(secret_list):
+            print("🚫 Invalid choice.")
+            return
+
+        selected_secret = secret_list[int(choice) - 1]["Name"]
+        print(f"\n🔑 Attempting to read secret: {selected_secret}")
+
+        try:
+            secret_value = secrets_client.get_secret_value(SecretId=selected_secret)
+            print("\n✅ Secret Retrieved Successfully!")
+            print(f"🗝️ Secret Name: {selected_secret}")
+            print(f"🔒 Secret Value: {secret_value.get('SecretString', '<binary or empty>')}")
+
+        except botocore.exceptions.ClientError as e:
+            code = e.response["Error"]["Code"]
+
+            if code == "AccessDeniedException":
+                print("🚫 Access Denied: You do not have permission to read this secret.")
+            elif code == "ResourceNotFoundException":
+                print("🚫 Secret not found. It may have been deleted or renamed.")
+            elif code == "DecryptionFailure":
+                print("🚫 KMS Decryption failed. Check KMS permissions or key policy.")
+            else:
+                print(f"⚠️ Unexpected AWS Error while reading secret: {code}")
+
+        except Exception as e:
+            print(f"🚫 Unexpected error while accessing secret: {e}")
+
     except botocore.exceptions.ClientError as e:
         code = e.response["Error"]["Code"]
-        msg = e.response["Error"]["Message"]
-        print("\n❌ Could not retrieve secret!")
-        print("Error Code:", code)
-        print("Reason:", msg)
         if code == "AccessDeniedException":
-            print("⚠️ Missing 'secretsmanager:GetSecretValue' or 'kms:Decrypt' permission.")
-        elif code == "DecryptionFailure":
-            print("⚠️ KMS decryption failed — check key policy or permissions.")
-        elif code == "ResourceNotFoundException":
-            print("⚠️ Secret not found — check name or region.")
+            print("🚫 Access Denied: You do not have permission to list secrets.")
         else:
-            print("⚠️ Unexpected AWS error occurred.")
+            print(f"⚠️ Unexpected AWS Error while listing secrets: {code}")
+
+    except Exception as e:
+        print(f"🚫 Failed to list secrets: {e}")
+
 
 def main():
-    creds = load_credentials("creds.txt")
-    base_session = init_base_session(creds)
-    session = assume_role_if_specified(base_session, creds)
-    client = session.client("secretsmanager")
-    secrets = list_secrets(client)
-    if not secrets:
-        return
-    choice = input("\nEnter secret name or number to retrieve: ").strip()
-    if choice.isdigit():
-        idx = int(choice) - 1
-        if 0 <= idx < len(secrets):
-            secret_name = secrets[idx]
-        else:
-            print("❌ Invalid selection.")
-            return
-    else:
-        secret_name = choice
-    get_secret(client, secret_name)
+    username = input("Enter username: ").strip()
+    password = getpass.getpass("Enter password: ")
+
+    tokens = authenticate_user(username, password)
+    id_token = tokens["IdToken"]
+
+    creds = get_temporary_credentials(id_token)
+
+    sts = boto3.client(
+        "sts",
+        aws_access_key_id=creds["AccessKeyId"],
+        aws_secret_access_key=creds["SecretKey"],
+        aws_session_token=creds["SessionToken"]
+    )
+    identity = sts.get_caller_identity()
+    print(f"\n🔍 Currently assumed role ARN: {identity['Arn']}")
+
+    access_secrets_interactively(creds)
+
 
 if __name__ == "__main__":
     main()
